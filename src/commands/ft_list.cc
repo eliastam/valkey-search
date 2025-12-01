@@ -12,6 +12,7 @@
 #include "absl/strings/string_view.h"
 #include "src/commands/commands.h"
 #include "src/schema_manager.h"
+#include "src/coordinator/metadata_manager.h"
 #include "vmsdk/src/utils.h"
 #include "vmsdk/src/valkey_module_api/valkey_module.h"
 
@@ -22,6 +23,9 @@ absl::Status FTListCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
   if (argc > 1) {
     return absl::InvalidArgumentError(vmsdk::WrongArity(kListCommand));
   }
+  
+  ValkeyModule_Call(ctx, "FT_INTERNAL_UPDATE", "");
+  
   absl::flat_hash_set<std::string> names =
       SchemaManager::Instance().GetIndexSchemasInDB(
           ValkeyModule_GetSelectedDb(ctx));
