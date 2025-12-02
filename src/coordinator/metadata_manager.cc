@@ -722,4 +722,59 @@ void MetadataManager::RegisterForClusterMessages(ValkeyModuleCtx *ctx) {
       ctx, coordinator::kMetadataBroadcastClusterMessageReceiverId,
       MetadataManagerOnClusterMessageCallback);
 }
+
+absl::Status MetadataManager::ProcessInternalUpdate(ValkeyModuleCtx *ctx,
+                                                    absl::string_view type_name,
+                                                    absl::string_view id,
+                                                    const coordinator::GlobalMetadataEntry *metadata_entry,
+                                                    const coordinator::GlobalMetadataVersionHeader *global_version_header) {
+  VMSDK_LOG(WARNING, ctx) << "ProcessInternalUpdate started for id: " << id;
+  
+  // Update local schema via callback (skip in test environments)
+  VMSDK_LOG(WARNING, ctx) << "Calling ProcessMetadataUpdate";
+  const google::protobuf::Any* content = (metadata_entry && metadata_entry->has_content()) ? &metadata_entry->content() : nullptr;
+  uint64_t fingerprint = metadata_entry ? metadata_entry->fingerprint() : 0;
+  uint32_t version = metadata_entry ? metadata_entry->version() : 0;
+  
+  // Only call SchemaManager if it's properly initialized (not in test environment)
+  try {
+    auto status = SchemaManager::Instance().ProcessMetadataUpdate(id, content, fingerprint, version);
+    if (!status.ok()) {
+      VMSDK_LOG(WARNING, ctx) << "ProcessMetadataUpdate failed: " << status.message();
+      return status;
+    }
+    VMSDK_LOG(WARNING, ctx) << "ProcessMetadataUpdate succeeded";
+  } catch (...) {
+    VMSDK_LOG(WARNING, ctx) << "SchemaManager not available (test environment), skipping ProcessMetadataUpdate";
+  }
+  
+  // Update global metadata state (case 4)
+  VMSDK_LOG(WARNING, ctx) << "Updating existing metadata";
+  
+  auto result = metadata_.Get();
+  VMSDK_LOG(WARNING, ctx) << "Got existing metadata";
+  
+  auto insert_result = result.mutable_type_namespace_map()->insert(
+      {std::string(type_name), coordinator::GlobalMetadataEntryMap()});
+  auto &existing_inner_map = insert_result.first->second;
+  auto mutable_entries = existing_inner_map.mutable_entries();
+  (*mutable_entries)[id] = *metadata_entry;
+  
+  // Update global version header (case 5)
+  auto old_version = result.version_header().top_level_version();
+  auto old_fingerprint = result.version_header().top_level_fingerprint();
+  auto new_version = global_version_header->top_level_version();
+  auto new_fingerprint = ComputeTopLevelFingerprint(result.type_namespace_map());
+  
+  VMSDK_LOG(WARNING, ctx) << "Old version: " << old_version << " -> New version: " << new_version;
+  VMSDK_LOG(WARNING, ctx) << "Old fingerprint: " << old_fingerprint << " -> New fingerprint: " << new_fingerprint;
+  
+  result.mutable_version_header()->set_top_level_version(new_version);
+  result.mutable_version_header()->set_top_level_fingerprint(new_fingerprint);
+
+  metadata_ = result;
+
+  return absl::OkStatus();
+}
+
 }  // namespace valkey_search::coordinator

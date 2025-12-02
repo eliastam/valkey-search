@@ -64,6 +64,14 @@ class SchemaManager {
       uint32_t db_num, absl::string_view name) const
       ABSL_LOCKS_EXCLUDED(db_to_index_schemas_mutex_);
   absl::flat_hash_set<std::string> GetIndexSchemasInDB(uint32_t db_num) const;
+  
+  // Public wrapper for metadata callback (used by MetadataManager)
+  absl::Status ProcessMetadataUpdate(absl::string_view id,
+                                    const google::protobuf::Any *metadata,
+                                    uint64_t fingerprint, uint32_t version) {
+    return OnMetadataCallback(id, metadata, fingerprint, version);
+  }
+  
   // TODO Investigate storing aggregated counters to optimize stats
   // generation.
   uint64_t GetNumberOfIndexSchemas() const;
