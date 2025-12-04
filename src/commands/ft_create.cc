@@ -48,6 +48,7 @@ class CreateConsistencyCheckFanoutOperation
 
 absl::Status FTCreateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
                          int argc) {
+  VMSDK_LOG(WARNING, ctx) << "🔍 DETECTIVE: FTCreateCmd called with argc=" << argc;
   VMSDK_ASSIGN_OR_RETURN(auto index_schema_proto,
                          ParseFTCreateArgs(ctx, argv + 1, argc - 1));
   index_schema_proto.set_db_num(ValkeyModule_GetSelectedDb(ctx));
@@ -79,7 +80,15 @@ absl::Status FTCreateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
     }
     ValkeyModule_ReplyWithSimpleString(ctx, "OK");
   }
-  // Replication handled by ProcessInternalUpdate for unified AOF experience
+
+  // Handle replication based on coordinator mode
+  if (!ValkeySearch::Instance().IsCluster()) {
+    // Non-cluster mode (primary-replica): use traditional replication
+    ValkeyModule_ReplicateVerbatim(ctx);
+  }
+  // Coordinator mode: replication handled by ProcessInternalUpdate for unified AOF experience
+
+  VMSDK_LOG(WARNING, ctx) << "🔍 DETECTIVE: FTCreateCmd completed successfully";
   return absl::OkStatus();
 }
 }  // namespace valkey_search
