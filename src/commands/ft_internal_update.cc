@@ -12,38 +12,33 @@
 
 namespace valkey_search {
 
+constexpr int kFTInternalUpdateArgCount = 4;
+
 absl::Status FTInternalUpdateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
-  VMSDK_LOG(WARNING, ctx) << "FT.INTERNAL_UPDATE called with argc=" << argc;
-  
-  if (argc != 4) {
+  if (argc != kFTInternalUpdateArgCount) {
     return absl::InvalidArgumentError("ERR wrong number of arguments for FT_INTERNAL_UPDATE");
   }
   
-  // Parse id
+  // Parse index ID
   size_t id_len;
-  const char* id_ptr = ValkeyModule_StringPtrLen(argv[1], &id_len);
-  std::string id(id_ptr, id_len);
-  VMSDK_LOG(WARNING, ctx) << "ID: " << id;
+  const char *id_data = ValkeyModule_StringPtrLen(argv[1], &id_len);
+  std::string id(id_data, id_len);
   
   // Deserialize GlobalMetadataEntry
   size_t metadata_len;
-  const char* metadata_data = ValkeyModule_StringPtrLen(argv[2], &metadata_len);
+  const char *metadata_data = ValkeyModule_StringPtrLen(argv[2], &metadata_len);
   coordinator::GlobalMetadataEntry metadata_entry;
   if (!metadata_entry.ParseFromArray(metadata_data, metadata_len)) {
-    return absl::InvalidArgumentError("ERR failed to parse metadata entry");
+    return absl::InvalidArgumentError("ERR failed to parse GlobalMetadataEntry");
   }
   
   // Deserialize GlobalMetadataVersionHeader
   size_t header_len;
-  const char* header_data = ValkeyModule_StringPtrLen(argv[3], &header_len);
+  const char *header_data = ValkeyModule_StringPtrLen(argv[3], &header_len);
   coordinator::GlobalMetadataVersionHeader version_header;
   if (!version_header.ParseFromArray(header_data, header_len)) {
-    return absl::InvalidArgumentError("ERR failed to parse version header");
+    return absl::InvalidArgumentError("ERR failed to parse GlobalMetadataVersionHeader");
   }
-  
-  bool is_deletion = !metadata_entry.has_content() || metadata_entry.content().type_url().empty();
-  std::string action = is_deletion ? "DROP" : "CREATE";
-  VMSDK_LOG(WARNING, ctx) << "Deserialized objects successfully for " << action << " of " << id;
   
   auto status = coordinator::MetadataManager::Instance().ProcessInternalUpdate(
       ctx, kSchemaManagerMetadataTypeName, id, &metadata_entry, &version_header);
@@ -51,15 +46,8 @@ absl::Status FTInternalUpdateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv
     return status;
   }
 
-  // Check context flags before replication
-  int ctx_flags = ValkeyModule_GetContextFlags(ctx);
-  VMSDK_LOG(WARNING, ctx) << "Context flags: " << ctx_flags;
-  VMSDK_LOG(WARNING, ctx) << "Binary data lengths - metadata: " << metadata_len << ", header: " << header_len;
-  
   // Replicate to AOF verbatim for persistence
-  VMSDK_LOG(WARNING, ctx) << "About to call ValkeyModule_ReplicateVerbatim for " << action;
-  int repl_result = ValkeyModule_ReplicateVerbatim(ctx);
-  VMSDK_LOG(WARNING, ctx) << "ValkeyModule_ReplicateVerbatim returned: " << repl_result;
+  ValkeyModule_ReplicateVerbatim(ctx);
 
   ValkeyModule_ReplyWithSimpleString(ctx, "OK");
   return absl::OkStatus();

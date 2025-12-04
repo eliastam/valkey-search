@@ -90,10 +90,10 @@ class MetadataManager {
 
   // Method for FT_INTERNAL_UPDATE to apply changes
   absl::Status ProcessInternalUpdate(ValkeyModuleCtx *ctx,
-                                    absl::string_view type_name,
-                                    absl::string_view id,
-                                    const coordinator::GlobalMetadataEntry *metadata_entry,
-                                    const coordinator::GlobalMetadataVersionHeader *global_version_header);
+                                     absl::string_view type_name,
+                                     absl::string_view id,
+                                     const coordinator::GlobalMetadataEntry *metadata_entry,
+                                     const coordinator::GlobalMetadataVersionHeader *global_version_header);
 
   std::unique_ptr<GlobalMetadata> GetGlobalMetadata();
 

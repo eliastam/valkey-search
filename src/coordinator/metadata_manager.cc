@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <utility>
@@ -205,6 +206,23 @@ absl::StatusOr<IndexFingerprintVersion> MetadataManager::CreateEntry(
       metadata.version_header().top_level_version() + 1);
   metadata.mutable_version_header()->set_top_level_fingerprint(
       ComputeTopLevelFingerprint(metadata.type_namespace_map()));
+
+  // Store the updated metadata
+  metadata_ = metadata;
+
+  // Call FT.INTERNAL_UPDATE for coordinator to ensure unified AOF replication
+  std::string metadata_binary, header_binary;
+  new_entry.SerializeToString(&metadata_binary);
+  metadata.version_header().SerializeToString(&header_binary);
+  
+  ValkeyModuleCallReply *reply = ValkeyModule_Call(detached_ctx_.get(), "FT.INTERNAL_UPDATE", "!Kcbb",
+                                                   std::string(id).c_str(),
+                                                   metadata_binary.data(), metadata_binary.size(),
+                                                   header_binary.data(), header_binary.size());
+  if (reply) {
+    ValkeyModule_FreeCallReply(reply);
+  }
+
   BroadcastMetadata(detached_ctx_.get(), metadata.version_header());
   IndexFingerprintVersion index_fingerprint_version;
   index_fingerprint_version.set_fingerprint(fingerprint);
@@ -272,7 +290,6 @@ void MetadataManager::RegisterType(absl::string_view type_name,
 }
 
 void MetadataManager::BroadcastMetadata(ValkeyModuleCtx *ctx) {
-  VMSDK_LOG(WARNING, ctx) << "BroadcastMetadata called";
   BroadcastMetadata(ctx, metadata_.Get().version_header());
 }
 
@@ -295,30 +312,23 @@ void MetadataManager::BroadcastMetadata(
     return;
   }
 
-  VMSDK_LOG(NOTICE, ctx) << "ELIAS-BROADCAST: Found " << num_nodes << " cluster nodes";
-
-  // Log all node IDs first
-  for (size_t i = 0; i < num_nodes; i++) {
-    std::string node_id(node_list[i], VALKEYMODULE_NODE_ID_LEN);
-    VMSDK_LOG(NOTICE, ctx) << "ELIAS-BROADCAST: Node[" << i << "] = " << node_id;
-  }
-
   for (size_t i = 0; i < num_nodes; i++) {
     std::string node_id(node_list[i], VALKEYMODULE_NODE_ID_LEN);
     int flags;
     if (ValkeyModule_GetClusterNodeInfo(ctx, node_id.c_str(), nullptr, nullptr, nullptr, &flags) == VALKEYMODULE_OK) {
-      VMSDK_LOG(NOTICE, ctx) << "ELIAS-BROADCAST: Node " << node_id << " has flags " << flags;
       // Only send to master nodes, skip replicas
       if (flags & VALKEYMODULE_NODE_MASTER) {
-        VMSDK_LOG(NOTICE, ctx) << "ELIAS-BROADCAST: Sending to master node " << node_id;
         ValkeyModule_SendClusterMessage(ctx, node_id.c_str(),
                                        kMetadataBroadcastClusterMessageReceiverId,
                                        payload.c_str(), payload.size());
       } else {
-        VMSDK_LOG(NOTICE, ctx) << "ELIAS-BROADCAST: Skipping non-master node " << node_id;
+        VMSDK_LOG_EVERY_N_SEC(NOTICE, ctx, 10)
+            << "Skipping metadata broadcast to non-master node " << node_id
+            << " (flags=" << flags << ")";
       }
     } else {
-      VMSDK_LOG(WARNING, ctx) << "ELIAS-BROADCAST: Failed to get info for node " << node_id;
+      VMSDK_LOG_EVERY_N_SEC(WARNING, ctx, 10)
+          << "Failed to get cluster node info for node " << node_id;
     }
   }
 
@@ -365,7 +375,6 @@ void MetadataManager::HandleClusterMessage(ValkeyModuleCtx *ctx,
 void MetadataManager::HandleBroadcastedMetadata(
     ValkeyModuleCtx *ctx, const char *sender_id,
     std::unique_ptr<GlobalMetadataVersionHeader> header) {
-  VMSDK_LOG(WARNING, ctx) << "HandleBroadcastedMetadata from " << sender_id;
   if (is_loading_.Get()) {
     VMSDK_LOG_EVERY_N_SEC(WARNING, ctx, 10)
         << "Ignoring incoming metadata message due to loading...";
@@ -376,17 +385,12 @@ void MetadataManager::HandleBroadcastedMetadata(
   auto top_level_fingerprint =
       metadata.version_header().top_level_fingerprint();
   
-  VMSDK_LOG(WARNING, ctx) << "Local version: " << top_level_version << ", fingerprint: " << top_level_fingerprint;
-  VMSDK_LOG(WARNING, ctx) << "Remote version: " << header->top_level_version() << ", fingerprint: " << header->top_level_fingerprint();
-  
   if (header->top_level_version() < top_level_version) {
-    VMSDK_LOG(WARNING, ctx) << "Remote version is older, ignoring";
     return;
   }
   std::string sender_id_str(sender_id, VALKEYMODULE_NODE_ID_LEN);
   if (header->top_level_version() == top_level_version) {
     if (header->top_level_fingerprint() == top_level_fingerprint) {
-      VMSDK_LOG(WARNING, ctx) << "Same version and fingerprint, no sync needed";
       return;
     }
     VMSDK_LOG_EVERY_N_SEC(WARNING, ctx, 1)
@@ -455,18 +459,11 @@ void MetadataManager::HandleBroadcastedMetadata(
 absl::Status MetadataManager::ReconcileMetadata(const GlobalMetadata &proposed,
                                                 bool trigger_callbacks,
                                                 bool prefer_incoming) {
-  VMSDK_LOG(WARNING, detached_ctx_.get()) << "ReconcileMetadata called, trigger_callbacks=" << trigger_callbacks << ", prefer_incoming=" << prefer_incoming;
-  
   // We synthesize the new version in a new variable, so that if we need to
   // fail, the state is unchanged. The new version starts as a copy of the
   // current version.
   GlobalMetadata result;
   result.CopyFrom(metadata_.Get());
-  
-  VMSDK_LOG(WARNING, detached_ctx_.get()) << "Current metadata version: " << result.version_header().top_level_version() 
-                                          << ", fingerprint: " << result.version_header().top_level_fingerprint();
-  VMSDK_LOG(WARNING, detached_ctx_.get()) << "Proposed metadata version: " << proposed.version_header().top_level_version()
-                                          << ", fingerprint: " << proposed.version_header().top_level_fingerprint();
 
   // Merge the result with the incoming metadata
   for (const auto &[type_name, proposed_inner_map] :
@@ -522,35 +519,18 @@ absl::Status MetadataManager::ReconcileMetadata(const GlobalMetadata &proposed,
       }
 
       if (trigger_callbacks) {
-        
-        // Check if entry content is null/empty (deletion) - like OnMetadataCallback does
-        bool is_deletion = !proposed_entry.has_content() || proposed_entry.content().type_url().empty();
-        
-        std::string test_metadata;
-        proposed_entry.SerializeToString(&test_metadata);
-        VMSDK_LOG(WARNING, detached_ctx_.get()) << "Checking metadata for id: " << id << ", size: " << test_metadata.size() 
-                                                << ", has_content: " << proposed_entry.has_content()
-                                                << ", is_deletion: " << is_deletion;
-        
-        if (is_deletion) {
-          VMSDK_LOG(WARNING, detached_ctx_.get()) << "ENTERING FT.INTERNAL_UPDATE path for deletion of: " << id;
-        } else {
-          VMSDK_LOG(WARNING, detached_ctx_.get()) << "ENTERING FT.INTERNAL_UPDATE path for creation of: " << id;
-        }
-        
-        // Use new FT.INTERNAL_UPDATE for both creates and deletes
-        const char* action = is_deletion ? "DROP" : "CREATE";
-        VMSDK_LOG(WARNING, detached_ctx_.get()) << "Reconciliation triggering FT.INTERNAL_UPDATE " << action << " for type: " << type_name << ", id: " << id;
-        
+        // Use FT.INTERNAL_UPDATE for metadata updates
         // Use RunByMain to call FT.INTERNAL_UPDATE via ValkeyModule_Call
-        vmsdk::RunByMain([this, proposed_entry, id]() {
+        // Use promise/future to make it synchronous for error handling
+        std::promise<absl::Status> promise;
+        auto future = promise.get_future();
+        
+        vmsdk::RunByMain([this, proposed_entry, id, &promise]() {
 
           // Create a unique, valid context for this scope using base context
           auto thread_safe_ctx = vmsdk::MakeUniqueValkeyDetachedThreadSafeContext(detached_ctx_.get());
           ValkeyModuleCtx *ctx = thread_safe_ctx.get();
 
-          VMSDK_LOG(WARNING, ctx) << "RunByMain calling FT.INTERNAL_UPDATE with id: " << id;
-          
           // Create GlobalMetadataVersionHeader
           coordinator::GlobalMetadataVersionHeader version_header;
           version_header.set_top_level_version(metadata_.Get().version_header().top_level_version());
@@ -562,15 +542,28 @@ absl::Status MetadataManager::ReconcileMetadata(const GlobalMetadata &proposed,
           version_header.SerializeToString(&header_binary);
           
           // Call FT.INTERNAL_UPDATE via ValkeyModule_Call with '!' flag, passing id instead of action
-          ValkeyModule_Call(ctx, "FT.INTERNAL_UPDATE", "!cbb",
+          ValkeyModuleCallReply *reply = ValkeyModule_Call(ctx, "FT.INTERNAL_UPDATE", "!Kcbb",
                             id.c_str(), 
                             metadata_binary.data(), metadata_binary.size(),
                             header_binary.data(), header_binary.size());
           
-          VMSDK_LOG(WARNING, ctx) << "FT.INTERNAL_UPDATE call with id " << id << " from reconciliation completed";
+          if (reply == nullptr || ValkeyModule_CallReplyType(reply) == VALKEYMODULE_REPLY_ERROR) {
+            if (reply) ValkeyModule_FreeCallReply(reply);
+            promise.set_value(absl::InternalError("FT.INTERNAL_UPDATE failed"));
+            return;
+          }
+          
+          ValkeyModule_FreeCallReply(reply);
+          promise.set_value(absl::OkStatus());
           
           // thread_safe_ctx is automatically freed when the lambda exits
         });
+        
+        // Wait for the async operation to complete and check result
+        auto status = future.get();
+        if (!status.ok()) {
+          return status;
+        }
       }
     }
   }
@@ -697,7 +690,6 @@ mstime_t GetIntervalWithJitter(mstime_t interval, float jitter_ratio) {
 }
 
 void MetadataManagerSendMetadataBroadcast(ValkeyModuleCtx *ctx, void *data) {
-  VMSDK_LOG(WARNING, ctx) << "MetadataManagerSendMetadataBroadcast called";
   ValkeyModule_CreateTimer(ctx,
                            GetIntervalWithJitter(kMetadataBroadcastIntervalMs,
                                                  kMetadataBroadcastJitterRatio),
@@ -708,10 +700,8 @@ void MetadataManagerSendMetadataBroadcast(ValkeyModuleCtx *ctx, void *data) {
 void MetadataManager::OnServerCronCallback(
     ValkeyModuleCtx *ctx, [[maybe_unused]] ValkeyModuleEvent eid,
     [[maybe_unused]] uint64_t subevent, [[maybe_unused]] void *data) {
-  VMSDK_LOG(WARNING, ctx) << "OnServerCronCallback called";
   static bool timer_started = false;
   if (!timer_started) {
-    VMSDK_LOG(WARNING, ctx) << "Starting periodic broadcast timer";
     // The first server cron tick after the FT.CREATE is run needs to kick start
     // the timer. This can't be done during normal server event subscription
     // because timers cannot be safely created in background threads (the GIL
@@ -822,40 +812,27 @@ absl::Status MetadataManager::ProcessInternalUpdate(ValkeyModuleCtx *ctx,
                                                     absl::string_view id,
                                                     const coordinator::GlobalMetadataEntry *metadata_entry,
                                                     const coordinator::GlobalMetadataVersionHeader *global_version_header) {
-  VMSDK_LOG(WARNING, ctx) << "ProcessInternalUpdate started for id: " << id;
-  
   // Update local schema via callback
-  VMSDK_LOG(WARNING, ctx) << "Calling ProcessMetadataUpdate";
-  const google::protobuf::Any* content = (metadata_entry && metadata_entry->has_content()) ? &metadata_entry->content() : nullptr;
-  uint64_t fingerprint = metadata_entry ? metadata_entry->fingerprint() : 0;
-  uint32_t version = metadata_entry ? metadata_entry->version() : 0;
+  const google::protobuf::Any *content = (metadata_entry && metadata_entry->has_content()) ? &metadata_entry->content() : nullptr;
+  const uint64_t fingerprint = metadata_entry ? metadata_entry->fingerprint() : 0;
+  const uint32_t version = metadata_entry ? metadata_entry->version() : 0;
   auto status = SchemaManager::Instance().ProcessMetadataUpdate(id, content, fingerprint, version);
   if (!status.ok()) {
-    VMSDK_LOG(WARNING, ctx) << "ProcessMetadataUpdate failed: " << status.message();
     return status;
   }
-  VMSDK_LOG(WARNING, ctx) << "ProcessMetadataUpdate succeeded";
-  
-  // Update global metadata state (case 4)
-  VMSDK_LOG(WARNING, ctx) << "Updating existing metadata";
-  
+
+  // Update global metadata state
   auto result = metadata_.Get();
-  VMSDK_LOG(WARNING, ctx) << "Got existing metadata";
-  
+
   auto insert_result = result.mutable_type_namespace_map()->insert(
       {std::string(type_name), coordinator::GlobalMetadataEntryMap()});
   auto &existing_inner_map = insert_result.first->second;
   auto mutable_entries = existing_inner_map.mutable_entries();
   (*mutable_entries)[id] = *metadata_entry;
-  
-  // Update global version header (case 5)
-  auto old_version = result.version_header().top_level_version();
-  auto old_fingerprint = result.version_header().top_level_fingerprint();
-  auto new_version = global_version_header->top_level_version();
-  auto new_fingerprint = ComputeTopLevelFingerprint(result.type_namespace_map());
-  
-  VMSDK_LOG(WARNING, ctx) << "Old version: " << old_version << " -> New version: " << new_version;
-  VMSDK_LOG(WARNING, ctx) << "Old fingerprint: " << old_fingerprint << " -> New fingerprint: " << new_fingerprint;
+
+  // Update global version header
+  const auto new_version = global_version_header->top_level_version();
+  const auto new_fingerprint = ComputeTopLevelFingerprint(result.type_namespace_map());
   
   result.mutable_version_header()->set_top_level_version(new_version);
   result.mutable_version_header()->set_top_level_fingerprint(new_fingerprint);

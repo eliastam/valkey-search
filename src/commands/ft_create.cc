@@ -79,7 +79,7 @@ absl::Status FTCreateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
     }
     ValkeyModule_ReplyWithSimpleString(ctx, "OK");
   }
-  ValkeyModule_ReplicateVerbatim(ctx);
+  // Replication handled by ProcessInternalUpdate for unified AOF experience
   return absl::OkStatus();
 }
 }  // namespace valkey_search

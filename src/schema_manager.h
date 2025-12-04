@@ -67,8 +67,8 @@ class SchemaManager {
   
   // Public wrapper for metadata callback (used by MetadataManager)
   absl::Status ProcessMetadataUpdate(absl::string_view id,
-                                    const google::protobuf::Any *metadata,
-                                    uint64_t fingerprint, uint32_t version) {
+                                     const google::protobuf::Any *metadata,
+                                     uint64_t fingerprint, uint32_t version) {
     return OnMetadataCallback(id, metadata, fingerprint, version);
   }
   
