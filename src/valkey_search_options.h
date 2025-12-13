@@ -43,6 +43,12 @@ const config::Boolean& GetSkipIndexLoad();
 /// Return a mutable reference for testing
 config::Boolean& GetSkipIndexLoadMutable();
 
+/// Return the configuration entry for skipping corrupted AOF entries
+const config::Boolean& GetSkipCorruptedAOFEntries();
+
+/// Return the configuration entry for skipping corrupted AOF entries
+const config::Boolean& GetSkipCorruptedAOFEntries();
+
 /// Return the log level
 config::Enum& GetLogLevel();
 
