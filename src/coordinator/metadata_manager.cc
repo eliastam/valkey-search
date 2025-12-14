@@ -262,8 +262,10 @@ absl::StatusOr<IndexFingerprintVersion> MetadataManager::CreateEntry(
                                                    std::string(encoded_id).c_str(),
                                                    metadata_binary.data(), metadata_binary.size(),
                                                    header_binary.data(), header_binary.size());
-  if (reply) {
+  if (reply != nullptr && ValkeyModule_CallReplyType(reply) != VALKEYMODULE_REPLY_ERROR) {
     ValkeyModule_FreeCallReply(reply);
+  } else {
+    CHECK(false) << "FT.INTERNAL_UPDATE failed during CreateEntry for index " << encoded_id;
   }
 
   BroadcastMetadata(detached_ctx_.get(), metadata.version_header());
@@ -318,8 +320,10 @@ absl::Status MetadataManager::DeleteEntry(absl::string_view type_name,
                                                    std::string(encoded_id).c_str(),
                                                    metadata_binary.data(), metadata_binary.size(),
                                                    header_binary.data(), header_binary.size());
-  if (reply) {
+  if (reply != nullptr && ValkeyModule_CallReplyType(reply) != VALKEYMODULE_REPLY_ERROR) {
     ValkeyModule_FreeCallReply(reply);
+  } else {
+    CHECK(false) << "FT.INTERNAL_UPDATE failed during DeleteEntry for index " << encoded_id;
   }
 
   BroadcastMetadata(detached_ctx_.get(), metadata.version_header());
@@ -1004,7 +1008,8 @@ absl::Status MetadataManager::ProcessInternalUpdate(ValkeyModuleCtx *ctx,
               << "Failed during ProcessInternalUpdate callback for type " << type_name
               << ", id " << id << " from " << "ProcessInternalUpdate";
       Metrics::GetStats().process_internal_update_callback_failures_cnt++;
-      return result;
+      CHECK(false) << "ProcessInternalUpdate callback failed for type " << type_name 
+                   << ", id " << id << ": " << result.message();
     }
   }
 
